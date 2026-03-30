@@ -14,7 +14,7 @@ import soundfile as sf
 from flask import Flask, render_template_string, jsonify, request
 
 RECORDINGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
-SAMPLE_RATE = 44100
+SAMPLE_RATE = 48000
 CHANNELS = 1
 
 app = Flask(__name__)
@@ -35,16 +35,10 @@ state_lock = threading.Lock()
 def check_mic():
     """Check if a microphone is available and accessible."""
     try:
-        devices = sd.query_devices()
-        default_in = sd.default.device[0] if isinstance(sd.default.device, tuple) else sd.default.device
-        if default_in is None or default_in < 0:
-            # No explicit default, check if any input device exists
-            for d in devices if not isinstance(devices, sd.DeviceList) else devices:
-                if d["max_input_channels"] > 0:
-                    return True, d["name"]
-            return False, None
-        info = sd.query_devices(default_in, "input")
-        return True, info["name"]
+        info = sd.query_devices(kind="input")
+        if info and info["max_input_channels"] > 0:
+            return True, info["name"]
+        return False, None
     except Exception:
         return False, None
 
