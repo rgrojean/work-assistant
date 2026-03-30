@@ -5,20 +5,29 @@
 set -e
 
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
+VENV_DIR="$APP_DIR/.venv"
 PLIST_NAME="com.recorder.studio.plist"
 PLIST_SRC="$APP_DIR/$PLIST_NAME"
 PLIST_DST="$HOME/Library/LaunchAgents/$PLIST_NAME"
-PYTHON_PATH="$(which python3)"
 
 echo "=== Recording Studio Setup ==="
 echo ""
 echo "App directory: $APP_DIR"
-echo "Python:        $PYTHON_PATH"
+echo ""
+
+# Create virtual environment
+if [ ! -d "$VENV_DIR" ]; then
+    echo "Creating virtual environment..."
+    python3 -m venv "$VENV_DIR"
+fi
+
+PYTHON_PATH="$VENV_DIR/bin/python3"
+echo "Python: $PYTHON_PATH"
 echo ""
 
 # Install dependencies
 echo "Installing Python dependencies..."
-pip3 install -r "$APP_DIR/requirements.txt"
+"$VENV_DIR/bin/pip" install -r "$APP_DIR/requirements.txt"
 echo ""
 
 # Build the plist with correct paths
