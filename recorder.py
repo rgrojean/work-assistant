@@ -72,15 +72,19 @@ def start_recording():
         if state["status"] != "off":
             return jsonify(error="Already recording"), 400
         cat = request.json.get("category", "customer_call") if request.json else "customer_call"
+        try:
+            stream = sd.InputStream(
+                samplerate=SAMPLE_RATE, channels=CHANNELS, dtype="float32", callback=audio_callback,
+            )
+            stream.start()
+        except Exception as e:
+            return jsonify(error=f"Could not start recording: {e}"), 500
         state["category"] = cat
-        state["start_time"] = datetime.now()
+        state["stream"] = stream
+        state["audio_chunks"] = []
         state["paused_duration"] = timedelta()
         state["pause_start"] = None
-        state["audio_chunks"] = []
-        state["stream"] = sd.InputStream(
-            samplerate=SAMPLE_RATE, channels=CHANNELS, dtype="float32", callback=audio_callback,
-        )
-        state["stream"].start()
+        state["start_time"] = datetime.now()
         state["status"] = "recording"
     return jsonify(ok=True)
 
@@ -218,8 +222,8 @@ HTML = """<!DOCTYPE html>
   }
 
   async function doStart() {
-    await fetch('/api/start', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({category: getCategory()})});
-    startPolling();
+    const r = await fetch('/api/start', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({category: getCategory()})});
+    if (!r.ok) { const d = await r.json(); alert(d.error || 'Failed to start recording'); }
   }
   async function doPause() {
     await fetch('/api/pause', {method:'POST'});
