@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Simple Mac recording app with a browser-based UI."""
 
+import logging
 import os
 import json
 import threading
@@ -271,8 +272,11 @@ def index():
 
 
 def main():
+    # Suppress per-request logs (GET /api/status every 200ms is noisy)
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
     port = 5111
-    print(f"Opening http://localhost:{port}")
+    print(f"Recording Studio running at http://localhost:{port}")
     webbrowser.open(f"http://localhost:{port}")
     app.run(host="127.0.0.1", port=port, debug=False)
 
