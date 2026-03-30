@@ -32,6 +32,23 @@ state = {
 state_lock = threading.Lock()
 
 
+def check_mic():
+    """Check if a microphone is available and accessible."""
+    try:
+        devices = sd.query_devices()
+        default_in = sd.default.device[0] if isinstance(sd.default.device, tuple) else sd.default.device
+        if default_in is None or default_in < 0:
+            # No explicit default, check if any input device exists
+            for d in devices if not isinstance(devices, sd.DeviceList) else devices:
+                if d["max_input_channels"] > 0:
+                    return True, d["name"]
+            return False, None
+        info = sd.query_devices(default_in, "input")
+        return True, info["name"]
+    except Exception:
+        return False, None
+
+
 def audio_callback(indata, frames, time_info, status):
     with state_lock:
         if state["status"] == "recording":
@@ -56,6 +73,7 @@ def save_recording(chunks, category, timestamp):
 
 @app.route("/api/status")
 def get_status():
+    mic_ok, mic_name = check_mic()
     with state_lock:
         elapsed = 0
         if state["start_time"]:
@@ -63,7 +81,11 @@ def get_status():
             if state["status"] == "paused" and state["pause_start"]:
                 e -= datetime.now() - state["pause_start"]
             elapsed = max(0, e.total_seconds())
-        return jsonify(status=state["status"], elapsed=elapsed, category=state["category"])
+        return jsonify(
+            status=state["status"], elapsed=elapsed,
+            category=state["category"],
+            mic_ok=mic_ok, mic_name=mic_name or "",
+        )
 
 
 @app.route("/api/start", methods=["POST"])
@@ -194,6 +216,18 @@ HTML = """<!DOCTYPE html>
   .btn-stop { background: #555; color: #fff; }
   .btn-stop:hover { background: #666; }
   button:disabled { opacity: 0.3; cursor: default; pointer-events: none; }
+
+  /* Mic indicator */
+  .mic-status {
+    font-size: 12px; color: #666; margin-top: 16px;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+  }
+  .mic-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: #555;
+    display: inline-block;
+  }
+  .mic-dot.hot { background: #2ecc71; }
+  .mic-dot.none { background: #e74c3c; }
 </style>
 </head>
 <body>
@@ -212,6 +246,10 @@ HTML = """<!DOCTYPE html>
     <button class="btn-start" id="btnStart" onclick="doStart()">Start</button>
     <button class="btn-pause" id="btnPause" onclick="doPause()" disabled>Pause</button>
     <button class="btn-stop" id="btnStop" onclick="doStop()" disabled>Stop</button>
+  </div>
+  <div class="mic-status">
+    <span class="mic-dot" id="micDot"></span>
+    <span id="micText">Checking mic...</span>
   </div>
 </div>
 <script>
@@ -254,6 +292,12 @@ HTML = """<!DOCTYPE html>
       document.getElementById('btnPause').disabled = d.status === 'off';
       document.getElementById('btnPause').textContent = d.status === 'paused' ? 'Resume' : 'Pause';
       document.getElementById('btnStop').disabled = d.status === 'off';
+
+      // Mic indicator
+      const micDot = document.getElementById('micDot');
+      const micText = document.getElementById('micText');
+      micDot.className = 'mic-dot ' + (d.mic_ok ? 'hot' : 'none');
+      micText.textContent = d.mic_ok ? 'Mic hot \u2014 ' + d.mic_name : 'No mic detected';
 
       // Select the right category radio
       const radio = document.querySelector(`input[name="cat"][value="${d.category}"]`);
