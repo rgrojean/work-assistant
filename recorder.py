@@ -293,9 +293,11 @@ HTML = """<!DOCTYPE html>
       micDot.className = 'mic-dot ' + (d.mic_ok ? 'hot' : 'none');
       micText.textContent = d.mic_ok ? 'Mic hot \u2014 ' + d.mic_name : 'No mic detected';
 
-      // Select the right category radio
-      const radio = document.querySelector(`input[name="cat"][value="${d.category}"]`);
-      if (radio) radio.checked = true;
+      // Only sync category from server while recording (don't override user selection when idle)
+      if (d.status !== 'off') {
+        const radio = document.querySelector(`input[name="cat"][value="${d.category}"]`);
+        if (radio) radio.checked = true;
+      }
     } catch(e) {}
   }
 
