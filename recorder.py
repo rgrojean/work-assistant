@@ -1,290 +1,280 @@
 #!/usr/bin/env python3
-"""Simple Mac recording app with tkinter UI."""
+"""Simple Mac recording app with a browser-based UI."""
 
 import os
+import json
 import threading
-import time
+import webbrowser
 from datetime import datetime, timedelta
-
-import tkinter as tk
-from tkinter import ttk
 
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
-
+from flask import Flask, render_template_string, jsonify, request
 
 RECORDINGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
 SAMPLE_RATE = 44100
 CHANNELS = 1
 
+app = Flask(__name__)
 
-class RecorderApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Recording Studio")
-        self.root.resizable(False, False)
+# ---- Recording state ----
+state = {
+    "status": "off",  # off, recording, paused
+    "start_time": None,
+    "paused_duration": timedelta(),
+    "pause_start": None,
+    "audio_chunks": [],
+    "stream": None,
+    "category": "customer_call",
+}
+state_lock = threading.Lock()
 
-        # State
-        self.is_recording = False
-        self.is_paused = False
-        self.start_time = None
-        self.paused_duration = timedelta()
-        self.pause_start = None
-        self.audio_chunks = []
-        self.stream = None
-        self.pulse_visible = True
 
-        self._build_ui()
-        self._update_timer()
-        self._pulse_indicator()
+def audio_callback(indata, frames, time_info, status):
+    with state_lock:
+        if state["status"] == "recording":
+            state["audio_chunks"].append(indata.copy())
 
-    def _build_ui(self):
-        self.root.configure(bg="#1e1e1e")
-        main = tk.Frame(self.root, bg="#1e1e1e", padx=30, pady=20)
-        main.pack(fill="both", expand=True)
 
-        # --- Status indicator ---
-        status_frame = tk.Frame(main, bg="#1e1e1e")
-        status_frame.pack(pady=(0, 15))
+def save_recording(chunks, category, timestamp):
+    if not chunks:
+        return
+    date_folder = timestamp.strftime("%m-%d-%y")
+    folder = os.path.join(RECORDINGS_DIR, date_folder)
+    os.makedirs(folder, exist_ok=True)
+    time_str = timestamp.strftime("%H%M%S")
+    filename = f"{category}_{time_str}.wav"
+    filepath = os.path.join(folder, filename)
+    audio_data = np.concatenate(chunks, axis=0)
+    sf.write(filepath, audio_data, SAMPLE_RATE)
+    print(f"Saved: {filepath}")
 
-        self.status_dot = tk.Canvas(
-            status_frame, width=18, height=18, bg="#1e1e1e", highlightthickness=0
+
+# ---- API routes ----
+
+@app.route("/api/status")
+def get_status():
+    with state_lock:
+        elapsed = 0
+        if state["start_time"]:
+            e = datetime.now() - state["start_time"] - state["paused_duration"]
+            if state["status"] == "paused" and state["pause_start"]:
+                e -= datetime.now() - state["pause_start"]
+            elapsed = max(0, e.total_seconds())
+        return jsonify(status=state["status"], elapsed=elapsed, category=state["category"])
+
+
+@app.route("/api/start", methods=["POST"])
+def start_recording():
+    with state_lock:
+        if state["status"] != "off":
+            return jsonify(error="Already recording"), 400
+        cat = request.json.get("category", "customer_call") if request.json else "customer_call"
+        state["category"] = cat
+        state["start_time"] = datetime.now()
+        state["paused_duration"] = timedelta()
+        state["pause_start"] = None
+        state["audio_chunks"] = []
+        state["stream"] = sd.InputStream(
+            samplerate=SAMPLE_RATE, channels=CHANNELS, dtype="float32", callback=audio_callback,
         )
-        self.status_dot.pack(side="left", padx=(0, 8))
-        self._draw_dot("#555555")
+        state["stream"].start()
+        state["status"] = "recording"
+    return jsonify(ok=True)
 
-        self.status_label = tk.Label(
-            status_frame,
-            text="Off",
-            font=("Helvetica Neue", 22, "bold"),
-            fg="#aaaaaa",
-            bg="#1e1e1e",
-        )
-        self.status_label.pack(side="left")
 
-        # --- Timer ---
-        self.timer_label = tk.Label(
-            main,
-            text="00:00:00",
-            font=("SF Mono", 40),
-            fg="#ffffff",
-            bg="#1e1e1e",
-        )
-        self.timer_label.pack(pady=(0, 20))
-
-        # --- Category radio buttons ---
-        cat_frame = tk.Frame(main, bg="#1e1e1e")
-        cat_frame.pack(pady=(0, 20))
-
-        self.category = tk.StringVar(value="customer_call")
-        categories = [
-            ("Customer call", "customer_call"),
-            ("Internal prep", "internal_prep"),
-            ("1-1", "one_on_one"),
-        ]
-        for label, value in categories:
-            rb = tk.Radiobutton(
-                cat_frame,
-                text=label,
-                variable=self.category,
-                value=value,
-                font=("Helvetica Neue", 14),
-                fg="#cccccc",
-                bg="#1e1e1e",
-                selectcolor="#333333",
-                activebackground="#1e1e1e",
-                activeforeground="#ffffff",
-                highlightthickness=0,
-            )
-            rb.pack(anchor="w", pady=2)
-
-        # --- Buttons ---
-        btn_frame = tk.Frame(main, bg="#1e1e1e")
-        btn_frame.pack(pady=(0, 5))
-
-        btn_style = {
-            "font": ("Helvetica Neue", 14, "bold"),
-            "width": 10,
-            "height": 1,
-            "relief": "flat",
-            "cursor": "hand2",
-            "bd": 0,
-        }
-
-        self.start_btn = tk.Button(
-            btn_frame,
-            text="Start",
-            command=self._on_start,
-            bg="#e74c3c",
-            fg="#ffffff",
-            activebackground="#c0392b",
-            activeforeground="#ffffff",
-            **btn_style,
-        )
-        self.start_btn.pack(side="left", padx=5)
-
-        self.pause_btn = tk.Button(
-            btn_frame,
-            text="Pause",
-            command=self._on_pause,
-            bg="#555555",
-            fg="#999999",
-            state="disabled",
-            activebackground="#666666",
-            activeforeground="#ffffff",
-            **btn_style,
-        )
-        self.pause_btn.pack(side="left", padx=5)
-
-        self.stop_btn = tk.Button(
-            btn_frame,
-            text="Stop",
-            command=self._on_stop,
-            bg="#555555",
-            fg="#999999",
-            state="disabled",
-            activebackground="#666666",
-            activeforeground="#ffffff",
-            **btn_style,
-        )
-        self.stop_btn.pack(side="left", padx=5)
-
-    def _draw_dot(self, color):
-        self.status_dot.delete("all")
-        self.status_dot.create_oval(2, 2, 16, 16, fill=color, outline=color)
-
-    # --- Recording controls ---
-
-    def _on_start(self):
-        self.is_recording = True
-        self.is_paused = False
-        self.start_time = datetime.now()
-        self.paused_duration = timedelta()
-        self.pause_start = None
-        self.audio_chunks = []
-
-        self.stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=CHANNELS,
-            dtype="float32",
-            callback=self._audio_callback,
-        )
-        self.stream.start()
-
-        self.status_label.config(text="On Air", fg="#e74c3c")
-        self.start_btn.config(state="disabled", bg="#555555", fg="#999999")
-        self.pause_btn.config(state="normal", bg="#f39c12", fg="#ffffff")
-        self.stop_btn.config(state="normal", bg="#e74c3c", fg="#ffffff")
-
-    def _on_pause(self):
-        if not self.is_recording:
-            return
-
-        if not self.is_paused:
-            # Pause
-            self.is_paused = True
-            self.pause_start = datetime.now()
-            self.status_label.config(text="Paused", fg="#f39c12")
-            self.pause_btn.config(text="Resume")
+@app.route("/api/pause", methods=["POST"])
+def pause_recording():
+    with state_lock:
+        if state["status"] == "recording":
+            state["status"] = "paused"
+            state["pause_start"] = datetime.now()
+        elif state["status"] == "paused":
+            if state["pause_start"]:
+                state["paused_duration"] += datetime.now() - state["pause_start"]
+                state["pause_start"] = None
+            state["status"] = "recording"
         else:
-            # Resume
-            self.is_paused = False
-            if self.pause_start:
-                self.paused_duration += datetime.now() - self.pause_start
-                self.pause_start = None
-            self.status_label.config(text="On Air", fg="#e74c3c")
-            self.pause_btn.config(text="Pause")
+            return jsonify(error="Not recording"), 400
+    return jsonify(ok=True)
 
-    def _on_stop(self):
-        if not self.is_recording:
-            return
 
-        self.is_recording = False
-        self.is_paused = False
+@app.route("/api/stop", methods=["POST"])
+def stop_recording():
+    with state_lock:
+        if state["status"] == "off":
+            return jsonify(error="Not recording"), 400
+        if state["stream"]:
+            state["stream"].stop()
+            state["stream"].close()
+            state["stream"] = None
+        chunks = state["audio_chunks"]
+        category = state["category"]
+        state["audio_chunks"] = []
+        state["status"] = "off"
+        state["start_time"] = None
+        state["paused_duration"] = timedelta()
+        state["pause_start"] = None
 
-        if self.stream:
-            self.stream.stop()
-            self.stream.close()
-            self.stream = None
+    timestamp = datetime.now()
+    threading.Thread(target=save_recording, args=(chunks, category, timestamp), daemon=True).start()
+    return jsonify(ok=True)
 
-        # Capture data for background save
-        chunks = self.audio_chunks
-        self.audio_chunks = []
-        category = self.category.get()
-        timestamp = datetime.now()
 
-        # Save in background so user can start next recording immediately
-        threading.Thread(
-            target=self._save_recording,
-            args=(chunks, category, timestamp),
-            daemon=True,
-        ).start()
+# ---- UI ----
 
-        # Reset UI
-        self.start_time = None
-        self.paused_duration = timedelta()
-        self.pause_start = None
-        self.status_label.config(text="Off", fg="#aaaaaa")
-        self.timer_label.config(text="00:00:00")
-        self.start_btn.config(state="normal", bg="#e74c3c", fg="#ffffff")
-        self.pause_btn.config(
-            state="disabled", text="Pause", bg="#555555", fg="#999999"
-        )
-        self.stop_btn.config(state="disabled", bg="#555555", fg="#999999")
+HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recording Studio</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
+    background: #1a1a1a; color: #fff;
+    display: flex; justify-content: center; align-items: center;
+    min-height: 100vh;
+  }
+  .card {
+    background: #242424; border-radius: 20px; padding: 40px 48px;
+    text-align: center; min-width: 360px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  }
 
-    # --- Audio ---
+  /* Status */
+  .status { display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 8px; }
+  .dot {
+    width: 14px; height: 14px; border-radius: 50%; background: #555;
+    transition: background 0.3s;
+  }
+  .dot.on { background: #e74c3c; animation: pulse 1s ease-in-out infinite; }
+  .dot.paused { background: #f39c12; animation: none; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.2; } }
+  .status-text { font-size: 22px; font-weight: 700; color: #888; }
+  .status-text.on { color: #e74c3c; }
+  .status-text.paused { color: #f39c12; }
 
-    def _audio_callback(self, indata, frames, time_info, status):
-        if not self.is_paused:
-            self.audio_chunks.append(indata.copy())
+  /* Timer */
+  .timer {
+    font-size: 52px; font-weight: 300; letter-spacing: 2px;
+    font-variant-numeric: tabular-nums;
+    margin: 16px 0 28px; color: #fff;
+    font-family: "SF Mono", "Menlo", monospace;
+  }
 
-    def _save_recording(self, chunks, category, timestamp):
-        if not chunks:
-            return
+  /* Categories */
+  .categories { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin: 0 auto 28px; width: fit-content; }
+  .categories label {
+    font-size: 15px; color: #bbb; cursor: pointer;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .categories input[type="radio"] { accent-color: #e74c3c; width: 16px; height: 16px; }
 
-        date_folder = timestamp.strftime("%m-%d-%y")
-        folder = os.path.join(RECORDINGS_DIR, date_folder)
-        os.makedirs(folder, exist_ok=True)
+  /* Buttons */
+  .buttons { display: flex; gap: 10px; justify-content: center; }
+  button {
+    font-size: 15px; font-weight: 600; padding: 10px 28px;
+    border: none; border-radius: 10px; cursor: pointer;
+    transition: background 0.2s, opacity 0.2s;
+    min-width: 100px;
+  }
+  button:active { transform: scale(0.97); }
+  .btn-start { background: #e74c3c; color: #fff; }
+  .btn-start:hover { background: #c0392b; }
+  .btn-pause { background: #f39c12; color: #fff; }
+  .btn-pause:hover { background: #d68910; }
+  .btn-stop { background: #555; color: #fff; }
+  .btn-stop:hover { background: #666; }
+  button:disabled { opacity: 0.3; cursor: default; pointer-events: none; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="status">
+    <div class="dot" id="dot"></div>
+    <div class="status-text" id="statusText">Off</div>
+  </div>
+  <div class="timer" id="timer">00:00:00</div>
+  <div class="categories">
+    <label><input type="radio" name="cat" value="customer_call" checked> Customer call</label>
+    <label><input type="radio" name="cat" value="internal_prep"> Internal prep</label>
+    <label><input type="radio" name="cat" value="one_on_one"> 1-1</label>
+  </div>
+  <div class="buttons">
+    <button class="btn-start" id="btnStart" onclick="doStart()">Start</button>
+    <button class="btn-pause" id="btnPause" onclick="doPause()" disabled>Pause</button>
+    <button class="btn-stop" id="btnStop" onclick="doStop()" disabled>Stop</button>
+  </div>
+</div>
+<script>
+  let polling = null;
 
-        time_str = timestamp.strftime("%H%M%S")
-        filename = f"{category}_{time_str}.wav"
-        filepath = os.path.join(folder, filename)
+  function getCategory() {
+    return document.querySelector('input[name="cat"]:checked').value;
+  }
 
-        audio_data = np.concatenate(chunks, axis=0)
-        sf.write(filepath, audio_data, SAMPLE_RATE)
-        print(f"Saved: {filepath}")
+  async function doStart() {
+    await fetch('/api/start', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({category: getCategory()})});
+    startPolling();
+  }
+  async function doPause() {
+    await fetch('/api/pause', {method:'POST'});
+  }
+  async function doStop() {
+    await fetch('/api/stop', {method:'POST'});
+  }
 
-    # --- Timer & pulse ---
+  function fmt(sec) {
+    const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = Math.floor(sec%60);
+    return [h,m,s].map(v => String(v).padStart(2,'0')).join(':');
+  }
 
-    def _update_timer(self):
-        if self.is_recording and self.start_time:
-            elapsed = datetime.now() - self.start_time - self.paused_duration
-            if self.is_paused and self.pause_start:
-                elapsed -= datetime.now() - self.pause_start
-            total_seconds = max(0, int(elapsed.total_seconds()))
-            h, remainder = divmod(total_seconds, 3600)
-            m, s = divmod(remainder, 60)
-            self.timer_label.config(text=f"{h:02d}:{m:02d}:{s:02d}")
-        self.root.after(200, self._update_timer)
+  async function poll() {
+    try {
+      const r = await fetch('/api/status');
+      const d = await r.json();
+      const dot = document.getElementById('dot');
+      const st = document.getElementById('statusText');
+      const timer = document.getElementById('timer');
 
-    def _pulse_indicator(self):
-        if self.is_recording and not self.is_paused:
-            self.pulse_visible = not self.pulse_visible
-            color = "#e74c3c" if self.pulse_visible else "#1e1e1e"
-            self._draw_dot(color)
-        elif self.is_recording and self.is_paused:
-            self._draw_dot("#f39c12")
-        else:
-            self._draw_dot("#555555")
-        self.root.after(500, self._pulse_indicator)
+      dot.className = 'dot' + (d.status === 'recording' ? ' on' : d.status === 'paused' ? ' paused' : '');
+      st.className = 'status-text' + (d.status === 'recording' ? ' on' : d.status === 'paused' ? ' paused' : '');
+      st.textContent = d.status === 'recording' ? 'On Air' : d.status === 'paused' ? 'Paused' : 'Off';
+      timer.textContent = fmt(d.elapsed);
+
+      document.getElementById('btnStart').disabled = d.status !== 'off';
+      document.getElementById('btnPause').disabled = d.status === 'off';
+      document.getElementById('btnPause').textContent = d.status === 'paused' ? 'Resume' : 'Pause';
+      document.getElementById('btnStop').disabled = d.status === 'off';
+
+      // Select the right category radio
+      const radio = document.querySelector(`input[name="cat"][value="${d.category}"]`);
+      if (radio) radio.checked = true;
+    } catch(e) {}
+  }
+
+  function startPolling() {
+    if (!polling) polling = setInterval(poll, 200);
+  }
+  startPolling();
+</script>
+</body>
+</html>"""
+
+
+@app.route("/")
+def index():
+    return render_template_string(HTML)
 
 
 def main():
-    root = tk.Tk()
-    root.geometry("380x320")
-    RecorderApp(root)
-    root.mainloop()
+    port = 5111
+    print(f"Opening http://localhost:{port}")
+    webbrowser.open(f"http://localhost:{port}")
+    app.run(host="127.0.0.1", port=port, debug=False)
 
 
 if __name__ == "__main__":
