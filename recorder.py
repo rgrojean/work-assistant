@@ -235,6 +235,7 @@ HTML = """<!DOCTYPE html>
     <label><input type="radio" name="cat" value="customer_call" checked> Customer call</label>
     <label><input type="radio" name="cat" value="internal_prep"> Internal prep</label>
     <label><input type="radio" name="cat" value="one_on_one"> 1-1</label>
+    <label><input type="radio" name="cat" value="interview"> Interview</label>
   </div>
   <div class="buttons">
     <button class="btn-start" id="btnStart" onclick="doStart()">Start</button>
